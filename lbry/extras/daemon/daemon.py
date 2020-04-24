@@ -47,6 +47,7 @@ from lbry.extras.daemon.componentmanager import ComponentManager
 from lbry.extras.daemon.json_response_encoder import JSONResponseEncoder
 from lbry.extras.daemon import comment_client
 from lbry.extras.daemon.undecorated import undecorated
+from lbry.extras.daemon.prometheus import METRICS
 from lbry.file_analysis import VideoFileAnalyzer
 from lbry.schema.claim import Claim
 from lbry.schema.url import URL
@@ -457,7 +458,7 @@ class Daemon(metaclass=JSONRPCServerType):
         log.info("Starting LBRYNet Daemon")
         log.debug("Settings: %s", json.dumps(self.conf.settings_dict, indent=2))
         log.info("Platform: %s", json.dumps(self.platform_info, indent=2))
-
+        METRICS.install()
         self.need_connection_status_refresh.set()
         self._connection_status_task = self.component_manager.loop.create_task(
             self.keep_connection_status_up_to_date()
@@ -537,6 +538,7 @@ class Daemon(metaclass=JSONRPCServerType):
         log.info("stopped api server")
         if self.analytics_manager.is_started:
             self.analytics_manager.stop()
+        METRICS.uninstall()
         log.info("finished shutting down")
 
     async def handle_old_jsonrpc(self, request):
@@ -663,7 +665,9 @@ class Daemon(metaclass=JSONRPCServerType):
                 JSONRPCError.CODE_INVALID_PARAMS,
                 params_error_message,
             )
-
+        METRICS.PENDING_REQUESTS.labels(method=function_name).inc()
+        METRICS.REQUESTS_COUNT.labels(method=function_name).inc()
+        start = time.perf_counter()
         try:
             result = method(self, *_args, **_kwargs)
             if asyncio.iscoroutine(result):
@@ -677,6 +681,9 @@ class Daemon(metaclass=JSONRPCServerType):
             return JSONRPCError.create_command_exception(
                 command=function_name, args=_args, kwargs=_kwargs, exception=e, traceback=format_exc()
             )
+        finally:
+            METRICS.PENDING_REQUESTS.labels(method=function_name).dec()
+            METRICS.RESPONSE_TIMES.labels(method=function_name).observe(time.perf_counter() - start)
 
     def _verify_method_is_callable(self, function_path):
         if function_path not in self.callable_methods:
